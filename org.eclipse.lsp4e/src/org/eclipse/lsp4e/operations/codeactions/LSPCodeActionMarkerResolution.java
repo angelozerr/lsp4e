@@ -99,7 +99,7 @@ public class LSPCodeActionMarkerResolution implements IMarkerResolutionGenerator
 		try {
 			att = marker.getAttribute(LSP_REMEDIATION);
 			if (att == null) {
-				checkMarkerResoultion(marker);
+				checkMarkerResolution(marker);
 				att = marker.getAttribute(LSP_REMEDIATION);
 			}
 		} catch (IOException | CoreException | ExecutionException e) {
@@ -115,21 +115,22 @@ public class LSPCodeActionMarkerResolution implements IMarkerResolutionGenerator
 		} else if (att == null) {
 			return new IMarkerResolution[0];
 		}
-		List<Either<Command, CodeAction>> commands = (List<Either<Command, CodeAction>>) att;
+		CodeActionInfo info = (CodeActionInfo) att;
+		List<Either<Command, CodeAction>> commands = info.getCommands();
 		List<IMarkerResolution> res = new ArrayList<>(commands.size());
 		for (Either<Command, CodeAction> command : commands) {
 			if (command != null) {
 				if (command.isLeft()) {
 					res.add(new CommandMarkerResolution(command.getLeft()));
 				} else {
-					res.add(new CodeActionMarkerResolution(command.getRight()));
+					res.add(new CodeActionMarkerResolution(command.getRight(), info.getTextDocumentService()));
 				}
 			}
 		}
 		return res.toArray(new IMarkerResolution[res.size()]);
 	}
 
-	private void checkMarkerResoultion(IMarker marker) throws IOException, CoreException, InterruptedException, ExecutionException {
+	private void checkMarkerResolution(IMarker marker) throws IOException, CoreException, InterruptedException, ExecutionException {
 		IResource res = marker.getResource();
 		if (res != null && res.getType() == IResource.FILE) {
 			IFile file = (IFile)res;
@@ -144,8 +145,8 @@ public class LSPCodeActionMarkerResolution implements IMarkerResolutionGenerator
 				params.setContext(context);
 				params.setTextDocument(new TextDocumentIdentifier(LSPEclipseUtils.toUri(res).toString()));
 				params.setRange(diagnostic.getRange());
-				CompletableFuture<List<Either<Command, CodeAction>>> codeAction = lsf
-						.thenComposeAsync(ls -> ls.getTextDocumentService().codeAction(params));
+				CompletableFuture<CodeActionInfo> codeAction = lsf
+						.thenComposeAsync(ls -> ls.getTextDocumentService().codeAction(params).thenApply(ca -> new CodeActionInfo(ca, ls.getTextDocumentService())));
 				futures.add(codeAction);
 				codeAction.thenAcceptAsync(actions -> {
 					try {
@@ -259,7 +260,7 @@ public class LSPCodeActionMarkerResolution implements IMarkerResolutionGenerator
 		try {
 			Object remediation = marker.getAttribute(LSP_REMEDIATION);
 			if (remediation == null) {
-				checkMarkerResoultion(marker);
+				checkMarkerResolution(marker);
 				remediation = marker.getAttribute(LSP_REMEDIATION);
 			}
 			return remediation == COMPUTING || (remediation instanceof Collection<?> collection && !collection.isEmpty());

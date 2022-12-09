@@ -26,6 +26,7 @@ import org.eclipse.lsp4e.LanguageServerPlugin;
 import org.eclipse.lsp4e.command.CommandExecutor;
 import org.eclipse.lsp4e.operations.diagnostics.LSPDiagnosticsToMarkers;
 import org.eclipse.lsp4j.CodeAction;
+import org.eclipse.lsp4j.services.TextDocumentService;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.ui.IMarkerResolution;
 import org.eclipse.ui.views.markers.WorkbenchMarkerResolution;
@@ -33,9 +34,11 @@ import org.eclipse.ui.views.markers.WorkbenchMarkerResolution;
 public class CodeActionMarkerResolution extends WorkbenchMarkerResolution implements IMarkerResolution {
 
 	private final CodeAction codeAction;
+	private final TextDocumentService textDocumentService;
 
-	public CodeActionMarkerResolution(CodeAction codeAction) {
+	public CodeActionMarkerResolution(CodeAction codeAction, TextDocumentService textDocumentService) {
 		this.codeAction = codeAction;
+		this.textDocumentService = textDocumentService;
 	}
 
 	@Override
@@ -55,6 +58,15 @@ public class CodeActionMarkerResolution extends WorkbenchMarkerResolution implem
 
 	@Override
 	public void run(IMarker marker) {
+		if (codeAction.getEdit() == null && codeAction.getCommand() == null) {
+			// Unresolved code action "edit" property. Resolve it.
+			textDocumentService.resolveCodeAction(codeAction).thenAccept(ca -> run(ca, marker));
+		} else {
+			run(codeAction, marker);
+		}
+	}
+
+	private static void run(CodeAction codeAction,  IMarker marker) {
 		if (codeAction.getEdit() != null) {
 			LSPEclipseUtils.applyWorkspaceEdit(codeAction.getEdit(), codeAction.getTitle());
 		}
