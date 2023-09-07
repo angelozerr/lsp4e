@@ -716,7 +716,13 @@
             name="%view.languageServers.name"
             restorable="true">
       </view>
-
+      <view
+            category="org.eclipse.lsp4e.views"
+            class="org.eclipse.lsp4e.ui.console.LSPConsolesView"
+            id="org.eclipse.lsp4e.ui.lspConsoleView"
+            name="%view.lspConsoleView.name"
+            restorable="true">
+      </view>
    </extension>
 
    <!-- reusable expression definitions, see https://wiki.eclipse.org/Command_Core_Expressions -->

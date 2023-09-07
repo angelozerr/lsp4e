@@ -68,6 +68,7 @@ import org.eclipse.jface.text.IDocument;
 import org.eclipse.lsp4e.LanguageServersRegistry.LanguageServerDefinition;
 import org.eclipse.lsp4e.internal.FileBufferListenerAdapter;
 import org.eclipse.lsp4e.internal.SupportedFeatures;
+import org.eclipse.lsp4e.lifecycle.LanguageServerLifecycleManager;
 import org.eclipse.lsp4e.server.StreamConnectionProvider;
 import org.eclipse.lsp4e.ui.Messages;
 import org.eclipse.lsp4e.ui.UI;
@@ -112,6 +113,8 @@ import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 
 public class LanguageServerWrapper {
+
+	private static final int MAX_NUMBER_OF_RESTART_ATTEMPTS = 20; // TODO move this max value in settings
 
 	private final IFileBufferListener fileBufferListener = new FileBufferListenerAdapter() {
 		@Override
@@ -173,6 +176,13 @@ public class LanguageServerWrapper {
 	private boolean initiallySupportsWorkspaceFolders = false;
 	private final @NonNull IResourceChangeListener workspaceFolderUpdater = new WorkspaceFolderListener();
 
+	private int numberOfRestartAttempts;
+	private ServerStatus serverStatus;
+    private boolean disposed;
+    private Exception serverError;
+    private Long currentProcessId;
+    private List<String> currentProcessCommandLines;
+
 	/* Backwards compatible constructor */
 	public LanguageServerWrapper(@NonNull IProject project, @NonNull LanguageServerDefinition serverDefinition) {
 		this(project, serverDefinition, null);
@@ -200,6 +210,7 @@ public class LanguageServerWrapper {
 		String listenerThreadNameFormat = "LS-" + serverDefinition.id + projectName + "#listener-%d"; //$NON-NLS-1$ //$NON-NLS-2$
 		this.listener = Executors
 				.newCachedThreadPool(new ThreadFactoryBuilder().setNameFormat(listenerThreadNameFormat).build());
+		udateStatus(ServerStatus.none);
 	}
 
 	void stopDispatcher() {
@@ -235,6 +246,14 @@ public class LanguageServerWrapper {
 		return folders;
 	}
 
+	private void setEnabled(boolean enabled) {
+		//this.serverDefinition.setEnabled(enabled);
+	}
+
+	public boolean isEnabled() {
+		return true;
+	}
+
 	/**
 	 * Starts a language server and triggers initialization. If language server is
 	 * started and active, does nothing. If language server is inactive, restart it.
@@ -242,6 +261,18 @@ public class LanguageServerWrapper {
 	 * @throws IOException
 	 */
 	public synchronized void start() throws IOException {
+		if (serverError != null) {
+			// Here the language server has been not possible
+			// we stop it and attempts a new restart if needed
+			stop();
+			if (numberOfRestartAttempts > MAX_NUMBER_OF_RESTART_ATTEMPTS - 1) {
+				// Disable the language server
+				setEnabled(false);
+				return;
+			} else {
+				numberOfRestartAttempts++;
+			}
+		}
 		final var filesToReconnect = new HashMap<URI, IDocument>();
 		if (this.languageServer != null) {
 			if (isActive()) {
@@ -264,10 +295,26 @@ public class LanguageServerWrapper {
 					this.lspStreamProvider = serverDefinition.createConnectionProvider();
 				}
 				initParams.setInitializationOptions(this.lspStreamProvider.getInitializationOptions(rootURI));
+
+				// Starting process...
+                udateStatus(ServerStatus.starting);
+                getLanguageServerLifecycleManager().onStatusChanged(this);
+                this.currentProcessId = null;
+                this.currentProcessCommandLines = null;
 				try {
 					lspStreamProvider.start();
 				} catch (IOException e) {
 					throw new RuntimeException(e);
+				}
+
+				// As process can be stopped, we loose pid and command lines information
+                // when server is stopped, we store them here.
+                // to display them in the Language server explorer even if process is killed.
+				ProcessHandle ph = getProcessHandle();
+				if (ph != null) {
+					this.currentProcessId = ph.pid();
+					final ProcessHandle.Info pi = ph.info();
+                    //this.currentProcessCommandLines = pi.commandLine().orElse(pi.command().orElse(null));
 				}
 				return null;
 			}).thenRun(() -> {
@@ -281,7 +328,7 @@ public class LanguageServerWrapper {
 				}
 
 				UnaryOperator<MessageConsumer> wrapper = consumer -> (message -> {
-					logMessage(message);
+					logMessage(message, consumer);
 					consumer.consume(message);
 					final StreamConnectionProvider currentConnectionProvider = this.lspStreamProvider;
 					if (currentConnectionProvider != null && isActive()) {
@@ -320,6 +367,8 @@ public class LanguageServerWrapper {
 					}
 				});
 				FileBuffers.getTextFileBufferManager().addFileBufferListener(fileBufferListener);
+				udateStatus(ServerStatus.started);
+                getLanguageServerLifecycleManager().onStatusChanged(this);
 			}).exceptionally(e -> {
 				LanguageServerPlugin.logError(e);
 				initializeFuture.completeExceptionally(e);
@@ -383,7 +432,8 @@ public class LanguageServerWrapper {
 				&& Boolean.TRUE.equals(serverCapabilities.getWorkspace().getWorkspaceFolders().getSupported());
 	}
 
-	private void logMessage(Message message) {
+	private void logMessage(Message message, MessageConsumer consumer) {
+		getLanguageServerLifecycleManager().logLSPMessage(message, consumer, this);
 		if (message instanceof ResponseMessage responseMessage && responseMessage.getError() != null
 				&& responseMessage.getId()
 						.equals(Integer.toString(ResponseErrorCode.RequestCancelled.getValue()))) {
@@ -400,16 +450,27 @@ public class LanguageServerWrapper {
 		return this.launcherFuture != null && !this.launcherFuture.isDone() && !this.launcherFuture.isCancelled();
 	}
 
-	private void removeStopTimerTask() {
+	private void udateStatus(ServerStatus serverStatus) {
+        this.serverStatus = serverStatus;
+    }
+
+	private void removeStopTimerTask(boolean stopping) {
 		synchronized (timer) {
 			if (stopTimerTask != null) {
 				stopTimerTask.cancel();
 				stopTimerTask = null;
 			}
 		}
+		if (!stopping) {
+            udateStatus(ServerStatus.started);
+            getLanguageServerLifecycleManager().onStatusChanged(this);
+        }
 	}
 
 	private void startStopTimerTask() {
+		udateStatus(ServerStatus.stopping);
+		getLanguageServerLifecycleManager().onStatusChanged(this);
+
 		synchronized (timer) {
 			if (stopTimerTask != null) {
 				stopTimerTask.cancel();
@@ -439,7 +500,7 @@ public class LanguageServerWrapper {
 		if (alreadyStopping) {
 			return;
 		}
-		removeStopTimerTask();
+		removeStopTimerTask(true);
 
 		if (this.languageClient != null) {
 			this.languageClient.dispose();
@@ -482,6 +543,9 @@ public class LanguageServerWrapper {
 				provider.stop();
 			}
 			this.stopping.set(false);
+
+			udateStatus(ServerStatus.stopped);
+            getLanguageServerLifecycleManager().onStatusChanged(this);
 		};
 
 		CompletableFuture.runAsync(shutdownKillAndStopFutureAndProvider);
@@ -577,7 +641,7 @@ public class LanguageServerWrapper {
 	 * @noreference internal so far
 	 */
 	private @Nullable CompletableFuture<@NonNull LanguageServerWrapper> connect(@NonNull URI uri, IDocument document) throws IOException {
-		removeStopTimerTask();
+		removeStopTimerTask(false);
 		if (this.connectedDocuments.containsKey(uri)) {
 			return CompletableFuture.completedFuture(this);
 		}
@@ -1016,6 +1080,10 @@ public class LanguageServerWrapper {
 		return serverDefinition.isSingleton || supportsWorkspaceFolderCapability();
 	}
 
+	 private LanguageServerLifecycleManager getLanguageServerLifecycleManager() {
+	        return LanguageServerLifecycleManager.getInstance();
+	    }
+
 	@Override
 	public String toString() {
 		final var ph = getProcessHandle();
@@ -1145,6 +1213,33 @@ public class LanguageServerWrapper {
 			return wsFolder != null && wsFolder.getUri() != null && !wsFolder.getUri().isEmpty();
 		}
 
+	}
+
+    // ------------------ Server status information .
+
+    /**
+     * Returns the server status.
+     *
+     * @return the server status.
+     */
+    public ServerStatus getServerStatus() {
+        return serverStatus;
+    }
+
+    public Exception getServerError() {
+        return serverError;
+    }
+
+    public int getNumberOfRestartAttempts() {
+        return numberOfRestartAttempts;
+    }
+
+    public int getMaxNumberOfRestartAttempts() {
+        return MAX_NUMBER_OF_RESTART_ATTEMPTS;
+    }
+
+    public Long getCurrentProcessId() {
+		return currentProcessId;
 	}
 
 }

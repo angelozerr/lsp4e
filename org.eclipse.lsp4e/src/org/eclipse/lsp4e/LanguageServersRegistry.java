@@ -18,6 +18,7 @@ import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -260,6 +261,8 @@ public class LanguageServersRegistry {
 	private final List<ContentTypeToLanguageServerDefinition> connections = new ArrayList<>();
 	private final IPreferenceStore preferenceStore;
 
+	private Map<String, LanguageServerDefinition> serverDefinitions;
+
 	private LanguageServersRegistry() {
 		this.preferenceStore = LanguageServerPlugin.getDefault().getPreferenceStore();
 		initialize();
@@ -277,13 +280,13 @@ public class LanguageServersRegistry {
 			}
 		}
 
-		final var servers = new HashMap<String, LanguageServerDefinition>();
+		serverDefinitions = new HashMap<String, LanguageServerDefinition>();
 		final var contentTypes = new ArrayList<ContentTypeMapping>();
 		for (IConfigurationElement extension : Platform.getExtensionRegistry().getConfigurationElementsFor(EXTENSION_POINT_ID)) {
 			String id = extension.getAttribute(ID_ATTRIBUTE);
 			if (id != null && !id.isEmpty()) {
 				if (extension.getName().equals(LS_ELEMENT)) {
-					servers.put(id, new ExtensionLanguageServerDefinition(extension));
+					serverDefinitions.put(id, new ExtensionLanguageServerDefinition(extension));
 				} else if (extension.getName().equals(MAPPING_ELEMENT)) {
 					IContentType contentType = Platform.getContentTypeManager().getContentType(extension.getAttribute(CONTENT_TYPE_ATTRIBUTE));
 					String languageId = extension.getAttribute(LANGUAGE_ID_ATTRIBUTE);
@@ -313,7 +316,7 @@ public class LanguageServersRegistry {
 		}
 
 		for (ContentTypeMapping mapping : contentTypes) {
-			LanguageServerDefinition lsDefinition = servers.get(mapping.id);
+			LanguageServerDefinition lsDefinition = serverDefinitions.get(mapping.id);
 			if (lsDefinition != null) {
 				registerAssociation(mapping.contentType, lsDefinition, mapping.languageId, mapping.enablement);
 			} else {
@@ -492,6 +495,13 @@ public class LanguageServersRegistry {
 			}
 		}
 		return res;
+	}
+
+	public Collection<LanguageServerDefinition> getLanguageServerDefinitions() {
+		if(serverDefinitions == null) {
+			return Collections.emptyList();
+		}
+		return serverDefinitions.values();
 	}
 
 }
